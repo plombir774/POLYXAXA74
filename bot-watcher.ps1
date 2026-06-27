@@ -41,11 +41,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ---------- CONFIG ----------
-$BotFolder     = "C:\Users\Никита\Documents\Polymarket_bot"
+$BotFolder     = "C:\Users\Никита\Documents\Polymarket"
 $PythonExe     = "python"
 $BotScript     = "run.py"
 $TaskName      = "PolymarketBotWatcher"
-$LogFile       = "C:\Users\Никита\Documents\Polymarket_bot\watcher.log"
+$LogFile       = "C:\Users\Никита\Documents\Polymarket\watcher.log"
 # ----------------------------
 
 function Write-Log  { param($msg) 
@@ -94,7 +94,7 @@ function Send-TelegramNotification {
 # ---------- Bot process management ----------
 function Stop-RunningBot {
     $procs = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like "*$BotScript*" -or $_.CommandLine -like "*Polymarket_bot*" }
+        Where-Object { $_.CommandLine -like "*$BotScript*" -or $_.CommandLine -like "*Polymarket*" }
     if ($procs) {
         $procs | ForEach-Object {
             Write-Log "Stopping PID $($_.ProcessId)"
