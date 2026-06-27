@@ -1,0 +1,31 @@
+# Secrets — NEVER commit
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# Database
+*.db
+*.db-journal
+*.sqlite
+
+# Logs
+*.log
+watcher.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
