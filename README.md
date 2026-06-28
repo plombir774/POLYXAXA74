@@ -223,5 +223,3 @@ Tests cover scoring, risk, market classification, top filtering, opportunity sca
 ## Disclaimer
 
 This bot is for private personal research. It is not financial advice, does not guarantee profits, does not automate trades, and should not be used to bypass any legal, geographic, platform, or account restrictions.
-
-<!-- watcher live-test marker 2026-06-28T07:37:56Z -->
