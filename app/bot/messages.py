@@ -456,6 +456,7 @@ def format_forecast_message(
     catalyst: CatalystLike | None = None,
     *,
     edge_threshold: int = 65,
+    external_context: str | None = None,
 ) -> str:
     classification = classification or classify_market(market, signal_score=signal.total)
     verdict = determine_verdict(signal.total, risk.total, classification.labels)
@@ -485,6 +486,14 @@ def format_forecast_message(
         movement_text,
         "",
         format_catalyst_check(catalyst),
+    ]
+    # V2.4.3: Show external context (Wikipedia/CoinGecko/FRED) in Telegram message
+    # so user can see what real-world data was fed to AI.
+    if external_context and external_context.strip():
+        lines.append("")
+        lines.append("External context")
+        lines.append(external_context.strip())
+    lines.extend([
         "",
         "Scores",
         f"Signal score: {signal.total}/100",
@@ -507,7 +516,7 @@ def format_forecast_message(
         *[f"- {item}" for item in risks[:6]],
         "",
         "Analysis-only. Not financial advice. No automated trading. No guaranteed profit.",
-    ]
+    ])
     return "\n".join(lines)
 
 

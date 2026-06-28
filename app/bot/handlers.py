@@ -779,6 +779,7 @@ async def forecast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             movement,
             catalyst,
             edge_threshold=context.application.bot_data["settings"].min_signal_score,
+            external_context=external_context or None,
         )
     )
 
