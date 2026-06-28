@@ -104,9 +104,19 @@ async def _fetch_wiki_extract(
         "explaintext": 1,
         "redirects": 1,
     }
+    # Wikipedia requires a descriptive User-Agent header. Without it, they
+    # return HTTP 429 Too Many Requests. See:
+    # https://www.mediawiki.org/wiki/API:Etiquette#User-Agent
+    headers = {
+        "User-Agent": (
+            "PolymarketBot/2.4.1 "
+            "(https://github.com/plombir774/POLYXAXA74; "
+            "personal research bot; contact via GitHub)"
+        ),
+    }
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
-            response = await client.get(WIKI_BASE_URL, params=params)
+            response = await client.get(WIKI_BASE_URL, params=params, headers=headers)
             if response.status_code >= 400:
                 logger.warning(
                     "wiki_api_failed article=%s status=%s",
