@@ -18,9 +18,9 @@ from app.external.fred import (
     relevant_series_for_title,
 )
 from app.external.fivethirtyeight import (
-    FTE_FEEDS,
     is_political_market,
-    relevant_feeds_for_title,
+    _pick_wikipedia_article,
+    _extract_keywords_from_title,
 )
 from app.external.aggregator import build_external_context
 
@@ -105,15 +105,20 @@ def test_is_political_market_rejects_non_political() -> None:
     assert not is_political_market("Will Fed cut rates?")
 
 
-def test_relevant_feeds_for_approval_market() -> None:
-    feeds = relevant_feeds_for_title("Trump approval rating above 40%?")
-    assert "president_approval" in feeds
+def test_wikipedia_article_picked_for_approval_market() -> None:
+    article = _pick_wikipedia_article("Trump approval rating above 40%?")
+    assert article and "Trump" in article
 
 
-def test_relevant_feeds_for_balance_of_power() -> None:
-    feeds = relevant_feeds_for_title("Balance of Power: 2026 Midterms")
-    # Should pick at least one of these
-    assert any(f in feeds for f in ("generic_ballot", "house_polls", "senate_polls"))
+def test_wikipedia_article_picked_for_balance_of_power() -> None:
+    article = _pick_wikipedia_article("Balance of Power: 2026 Midterms")
+    assert article and ("election" in article.lower() or "Senate" in article or "House" in article)
+
+
+def test_extract_keywords_finds_known_figures() -> None:
+    assert "Donald Trump" in _extract_keywords_from_title("Will Trump win 2028?")
+    assert "Gavin Newsom" in _extract_keywords_from_title("Will Newsom beat DeSantis?")
+    assert _extract_keywords_from_title("Will it rain tomorrow?") == []
 
 
 # ---------- Aggregator ----------
@@ -228,3 +233,61 @@ async def test_build_external_context_runs_sources_in_parallel() -> None:
     latest_start = max(s[1] for s in starts)
     earliest_end = min(e[1] for e in ends)
     assert latest_start < earliest_end, f"Sources did not run in parallel: {call_log}"
+
+
+# ---------- Fuzzy search regression tests (V2.4.1) ----------
+
+def test_fuzzy_search_does_not_match_when_key_noun_missing() -> None:
+    """Regression: /forecast 'Will Trump win 2028 election?' should NOT return
+    'Will Gavin Newsom win 2028 US Presidential Election?' — even though they
+    share common words (will, win, election, 2028). The proper noun 'Trump'
+    is not in the candidate, so the match must be rejected."""
+    from app.polymarket.client import rank_markets_by_text_query
+
+    candidates = [
+        {
+            "id": "1", "slug": "newsom-2028", "question": "Will Gavin Newsom win the 2028 US Presidential Election?",
+            "active": True, "closed": False, "acceptingOrders": True,
+            "volumeNum": 17_000_000, "liquidityNum": 466_000,
+        },
+        {
+            "id": "2", "slug": "vance-2028", "question": "Will JD Vance win the 2028 US Presidential Election?",
+            "active": True, "closed": False, "acceptingOrders": True,
+            "volumeNum": 14_000_000, "liquidityNum": 544_000,
+        },
+    ]
+    ranked = rank_markets_by_text_query(candidates, "Will Trump win the 2028 election?")
+    assert ranked == [], f"Expected no matches when 'trump' is not in any candidate, got {ranked}"
+
+
+def test_fuzzy_search_matches_when_exact_keywords_present() -> None:
+    """When candidate contains the proper noun from the query, match should succeed."""
+    from app.polymarket.client import rank_markets_by_text_query
+
+    candidates = [
+        {
+            "id": "1", "slug": "newsom-2028", "question": "Will Gavin Newsom win the 2028 US Presidential Election?",
+            "active": True, "closed": False, "acceptingOrders": True,
+            "volumeNum": 17_000_000, "liquidityNum": 466_000,
+        },
+    ]
+    ranked = rank_markets_by_text_query(candidates, "Will Gavin Newsom win the 2028 US Presidential Election?")
+    assert len(ranked) == 1
+    assert ranked[0][1]["slug"] == "newsom-2028"
+
+
+def test_fuzzy_search_partial_keyword_match_works() -> None:
+    """If query mentions 'Newsom 2028' and candidate is 'Gavin Newsom 2028 election',
+    it should match because 'newsom' is the proper noun shared."""
+    from app.polymarket.client import rank_markets_by_text_query
+
+    candidates = [
+        {
+            "id": "1", "slug": "newsom-2028", "question": "Will Gavin Newsom win the 2028 US Presidential Election?",
+            "active": True, "closed": False, "acceptingOrders": True,
+            "volumeNum": 17_000_000, "liquidityNum": 466_000,
+        },
+    ]
+    ranked = rank_markets_by_text_query(candidates, "Newsom 2028 election")
+    assert len(ranked) >= 1
+    assert ranked[0][1]["slug"] == "newsom-2028"

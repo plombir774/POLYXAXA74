@@ -256,14 +256,65 @@ def _candidate_question_text(raw: dict[str, Any]) -> str:
     return ""
 
 
+def _key_nouns(text: str) -> set[str]:
+    """Extract meaningful keywords (length >= 4) from normalized text."""
+    return {t for t in _meaningful_tokens(text) if len(t) >= 4}
+
+
+def _proper_nouns_in_query(query: str) -> set[str]:
+    """Detect capitalized words in the original query (likely proper nouns).
+
+    Proper nouns (Trump, Biden, Bitcoin, MegaETH) are the strongest signal
+    for what the user actually wants. If a candidate doesn't contain ANY of
+    them, it's almost certainly the wrong market.
+    """
+    proper: set[str] = set()
+    for match in re.findall(r"\b[A-Z][a-zA-Z]{2,}\b", query):
+        proper.add(match.lower())
+    for match in re.findall(r"\b[A-Z]{3,}\b", query):
+        proper.add(match.lower())
+    common_starts = {"will", "the", "what", "when", "how", "this", "that", "these", "those", "who", "whom", "whose", "which"}
+    return proper - common_starts
+
+
+def market_matches_text_query(raw: dict[str, Any], query: str, *, min_score: float = 0.7) -> bool:
+    """Backwards-compatible wrapper: True if a market matches a free-text query.
+
+    Kept for V2.3 test compatibility. V2.4.1 logic uses rank_markets_by_text_query
+    which has stricter gating (proper noun matching).
+    """
+    if not is_active_open_market(raw):
+        return False
+    normalized_query = _normalize_query_text(query)
+    if not normalized_query:
+        return False
+    candidate = _candidate_question_text(raw)
+    if not candidate:
+        return False
+    if normalized_query == candidate:
+        return True
+    if normalized_query in candidate or candidate in normalized_query:
+        return True
+    return _text_similarity(normalized_query, candidate) >= min_score
+
+
 def rank_markets_by_text_query(
     candidates: list[dict[str, Any]],
     query: str,
 ) -> list[tuple[float, dict[str, Any]]]:
-    """Rank active markets by fuzzy similarity to a free-text query."""
+    """Rank active markets by fuzzy similarity to a free-text query.
+
+    Returns only matches where:
+    - score >= 0.6 (high similarity)
+    - AND at least one key noun (4+ letters, non-stopword) from query is in candidate
+    - AND if query contains proper nouns (Trump, Bitcoin, etc.), at least one
+      of them must appear in the candidate — otherwise we'd return wrong markets.
+    """
     normalized_query = _normalize_query_text(query)
     if not normalized_query:
         return []
+    query_nouns = _key_nouns(normalized_query)
+    proper_nouns = _proper_nouns_in_query(query)
     scored: list[tuple[float, dict[str, Any]]] = []
     for raw in candidates:
         if not isinstance(raw, dict) or not is_active_open_market(raw):
@@ -277,8 +328,16 @@ def rank_markets_by_text_query(
             score = 0.9
         else:
             score = _text_similarity(normalized_query, candidate)
-        if score >= 0.5:
-            scored.append((score, raw))
+        if score < 0.6:
+            continue
+        candidate_tokens = set(candidate.split()) | set(_meaningful_tokens(candidate))
+        # Gating 1: at least one key noun must be in candidate
+        if query_nouns and not query_nouns.intersection(candidate_tokens):
+            continue
+        # Gating 2: if query has proper nouns, candidate must contain at least one
+        if proper_nouns and not proper_nouns.intersection(candidate_tokens):
+            continue
+        scored.append((score, raw))
     scored.sort(key=lambda item: (item[0], market_sort_volume(item[1])), reverse=True)
     return scored
 

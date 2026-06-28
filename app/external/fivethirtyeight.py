@@ -1,20 +1,22 @@
-"""FiveThirtyEight polls client — public CSV, no API key needed.
+"""Wikipedia-based political context provider (V2.4.1).
 
-Provides polling aggregations for political markets — presidential approval,
-generic congressional ballot, Senate/House race polls. Useful for markets
-like "Will Democrats win the House in 2026?" or "Trump approval rating".
+FiveThirtyEight polling CSVs were discontinued in 2024 (their domain now
+redirects to ABC News). This module replaces the FTE-based provider with
+a Wikipedia fetch that pulls the latest polling summary from public
+Wikipedia articles.
 
-Data source: https://projects.fivethirtyeight.com/polls/data/
-Files are public CSVs, updated regularly.
+For each political market, we look up the most relevant Wikipedia article
+and extract the lead section. The AI then uses this context to reason
+about real-world polling / political state.
 
-We only fetch a small summary (latest poll average) to keep the prompt small.
+Wikipedia API is free, no key required. Rate limit: 200 req/s.
+Docs: https://www.mediawiki.org/wiki/API:Main_page
 """
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -22,18 +24,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Base URL for FiveThirtyEight polling CSVs
-FTE_BASE_URL = "https://projects.fivethirtyeight.com/polls/data"
-
-# Most useful feeds for Polymarket political markets
-FTE_FEEDS: dict[str, str] = {
-    "president_approval": f"{FTE_BASE_URL}/approval_topline.csv",
-    "generic_ballot": f"{FTE_BASE_URL}/house_generic_ballot_polls.csv",
-    "president_polls": f"{FTE_BASE_URL}/president_polls.csv",
-    "senate_polls": f"{FTE_BASE_URL}/senate_polls.csv",
-    "house_polls": f"{FTE_BASE_URL}/house_polls.csv",
-    "governor_polls": f"{FTE_BASE_URL}/governor_polls.csv",
-}
+WIKI_BASE_URL = "https://en.wikipedia.org/w/api.php"
 
 
 # Keywords that hint a market is political.
@@ -41,124 +32,119 @@ POLITICAL_KEYWORDS: tuple[str, ...] = (
     "election", "president", "presidential", "senate", "house", "governor",
     "congress", "approval rating", "trump", "biden", "harris", "democrats",
     "republicans", "democratic", "republican", "primary", "midterm",
-    "balance of power",
+    "balance of power", "newsom", "vance", "aoc", "ocasio-cortez",
+    "sanders", "obama", "Clinton", "desantis",
 )
 
 
 def is_political_market(title: str) -> bool:
     title_lower = title.lower()
-    return any(kw in title_lower for kw in POLITICAL_KEYWORDS)
+    return any(kw.lower() in title_lower for kw in POLITICAL_KEYWORDS)
 
 
-def relevant_feeds_for_title(title: str) -> list[str]:
-    """Pick relevant FiveThirtyEight feeds based on market title."""
+def _extract_keywords_from_title(title: str) -> list[str]:
+    """Pull candidate names and key terms out of a market title."""
     title_lower = title.lower()
-    feeds: list[str] = []
-    if "approval" in title_lower or "trump approval" in title_lower or "biden approval" in title_lower:
-        feeds.append("president_approval")
-    if "generic ballot" in title_lower or "house" in title_lower:
-        if "balance of power" in title_lower or "control" in title_lower:
-            feeds.append("generic_ballot")
-        elif "house" in title_lower:
-            feeds.append("house_polls")
+    figures = {
+        "trump": "Donald Trump",
+        "biden": "Joe Biden",
+        "harris": "Kamala Harris",
+        "newsom": "Gavin Newsom",
+        "desantis": "Ron DeSantis",
+        "vance": "JD Vance",
+        "aoc": "Alexandria Ocasio-Cortez",
+        "ocasio-cortez": "Alexandria Ocasio-Cortez",
+        "sanders": "Bernie Sanders",
+        "obama": "Barack Obama",
+        "clinton": "Hillary Clinton",
+        "putin": "Vladimir Putin",
+        "macron": "Emmanuel Macron",
+        "musk": "Elon Musk",
+    }
+    found: list[str] = []
+    for key, full_name in figures.items():
+        if key in title_lower and full_name not in found:
+            found.append(full_name)
+    return found
+
+
+def _pick_wikipedia_article(title: str) -> str | None:
+    """Pick the most relevant Wikipedia article title to look up."""
+    figures = _extract_keywords_from_title(title)
+    if figures:
+        return figures[0]
+    title_lower = title.lower()
+    if "2028" in title_lower and ("election" in title_lower or "president" in title_lower):
+        return "2028 United States presidential election"
+    if "2026" in title_lower and "midterm" in title_lower:
+        return "2026 United States elections"
+    if "approval" in title_lower and "trump" in title_lower:
+        return "Donald Trump"
+    if "approval" in title_lower and "biden" in title_lower:
+        return "Joe Biden"
     if "senate" in title_lower:
-        feeds.append("senate_polls")
-    if "governor" in title_lower:
-        feeds.append("governor_polls")
-    if "president" in title_lower and "approval" not in title_lower:
-        feeds.append("president_polls")
-    # Default fallback for political markets with no specific match
-    if not feeds:
-        feeds.extend(["president_approval", "generic_ballot"])
-    return list(dict.fromkeys(feeds))
+        return "United States Senate"
+    if "house" in title_lower and "representatives" not in title_lower:
+        return "United States House of Representatives"
+    return None
 
 
-async def _fetch_csv(
-    url: str,
+async def _fetch_wiki_extract(
+    article_title: str,
     *,
-    timeout_seconds: float = 12.0,
-) -> list[dict[str, str]] | None:
+    timeout_seconds: float = 10.0,
+) -> str | None:
+    """Fetch the lead-section extract of a Wikipedia article."""
+    params = {
+        "action": "query",
+        "titles": article_title,
+        "format": "json",
+        "prop": "extracts",
+        "exintro": 1,
+        "explaintext": 1,
+        "redirects": 1,
+    }
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
-            response = await client.get(url, follow_redirects=True)
+            response = await client.get(WIKI_BASE_URL, params=params)
             if response.status_code >= 400:
-                logger.warning("fte_csv_failed url=%s status=%s", url, response.status_code)
+                logger.warning(
+                    "wiki_api_failed article=%s status=%s",
+                    article_title, response.status_code,
+                )
                 return None
-            text = response.text
-    except httpx.HTTPError as exc:
-        logger.warning("fte_csv_error url=%s msg=%s", url, str(exc)[:200])
-        return None
-    try:
-        reader = csv.DictReader(io.StringIO(text))
-        return list(reader)
-    except Exception as exc:
-        logger.warning("fte_csv_parse_error url=%s msg=%s", url, str(exc)[:200])
+            data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning(
+            "wiki_api_error article=%s msg=%s",
+            article_title, str(exc)[:200],
+        )
         return None
 
+    pages = data.get("query", {}).get("pages", {})
+    if not pages:
+        return None
+    page = next(iter(pages.values()))
+    extract = page.get("extract")
+    if not extract or "may refer to:" in extract.lower():
+        return None
+    return extract[:1200]
 
-def _summarize_approval(rows: list[dict[str, str]], limit: int = 5) -> list[str]:
-    """Summarize president approval polls."""
-    lines: list[str] = []
-    # Sort by date desc
-    def _date_key(row: dict[str, str]) -> str:
-        return row.get("modeldate") or row.get("enddate") or row.get("timestamp") or ""
-    rows_sorted = sorted(rows, key=_date_key, reverse=True)
-    seen: set[str] = set()
-    for row in rows_sorted[:50]:
-        subgroup = row.get("subgroup") or "All polls"
-        if subgroup in seen:
+
+def _summarize_extract(article_title: str, extract: str) -> list[str]:
+    """Pull 3-5 short bullet-worthy sentences from the Wikipedia extract."""
+    if not extract:
+        return []
+    sentences = re.split(r"(?<=[.!?])\s+", extract)
+    picked: list[str] = []
+    for s in sentences:
+        s = s.strip()
+        if not s or len(s) > 220:
             continue
-        seen.add(subgroup)
-        approve = row.get("approve_estimate") or row.get("approve") or ""
-        disapprove = row.get("disapprove_estimate") or row.get("disapprove") or ""
-        date = _date_key(row)
-        if approve and disapprove:
-            lines.append(f"  - {subgroup} ({date}): approve {approve}% / disapprove {disapprove}%")
-        if len(lines) >= limit:
+        picked.append(s)
+        if len(picked) >= 4:
             break
-    return lines
-
-
-def _summarize_generic_ballot(rows: list[dict[str, str]], limit: int = 3) -> list[str]:
-    lines: list[str] = []
-    rows_sorted = sorted(rows, key=lambda r: r.get("enddate") or r.get("created_at") or "", reverse=True)
-    seen: set[str] = set()
-    for row in rows_sorted[:30]:
-        pollster = row.get("pollster") or "Unknown"
-        end = row.get("enddate") or ""
-        dem = row.get("dem") or row.get("democrat") or ""
-        rep = row.get("rep") or row.get("republican") or ""
-        key = f"{pollster}_{end}"
-        if key in seen or not (dem and rep):
-            continue
-        seen.add(key)
-        lines.append(f"  - {pollster} ({end}): D {dem}% / R {rep}%")
-        if len(lines) >= limit:
-            break
-    return lines
-
-
-def _summarize_race_polls(rows: list[dict[str, str]], race_name: str, limit: int = 5) -> list[str]:
-    lines: list[str] = []
-    rows_sorted = sorted(rows, key=lambda r: r.get("enddate") or r.get("created_at") or "", reverse=True)
-    seen: set[str] = set()
-    for row in rows_sorted[:50]:
-        pollster = row.get("pollster") or "Unknown"
-        end = row.get("enddate") or ""
-        key = f"{pollster}_{end}"
-        if key in seen:
-            continue
-        seen.add(key)
-        # Generic candidate columns
-        cands = []
-        for cand_col in ("candidate_name", "candidate", "answer"):
-            if cand_col in row and row[cand_col]:
-                cands.append(f"{row[cand_col]}={row.get('pct', '')}%")
-        if cands:
-            lines.append(f"  - {pollster} ({end}): {', '.join(cands[:3])}")
-        if len(lines) >= limit:
-            break
-    return lines
+    return picked
 
 
 async def fetch_political_context(
@@ -166,37 +152,19 @@ async def fetch_political_context(
     *,
     timeout_seconds: float = 12.0,
 ) -> str:
-    """Fetch relevant FiveThirtyEight polls and format as context for AI prompt."""
+    """Fetch relevant Wikipedia context and format it for AI prompt."""
     if not is_political_market(title):
         return ""
-    feeds = relevant_feeds_for_title(title)
-    if not feeds:
+    article = _pick_wikipedia_article(title)
+    if not article:
         return ""
-    # Only fetch the most relevant feed to keep latency low
-    feed_key = feeds[0]
-    feed_url = FTE_FEEDS.get(feed_key)
-    if not feed_url:
+    extract = await _fetch_wiki_extract(article, timeout_seconds=timeout_seconds)
+    if not extract:
         return ""
-    rows = await _fetch_csv(feed_url, timeout_seconds=timeout_seconds)
-    if not rows:
+    summary = _summarize_extract(article, extract)
+    if not summary:
         return ""
-    lines: list[str] = [f"Political polls (FiveThirtyEight, latest):"]
-    if feed_key == "president_approval":
-        summary = _summarize_approval(rows)
-        if summary:
-            lines.extend(summary)
-        else:
-            return ""
-    elif feed_key == "generic_ballot":
-        summary = _summarize_generic_ballot(rows)
-        if summary:
-            lines.extend(summary)
-        else:
-            return ""
-    else:
-        summary = _summarize_race_polls(rows, feed_key)
-        if summary:
-            lines.extend(summary)
-        else:
-            return ""
+    lines = [f"Political context (Wikipedia — {article}):"]
+    for s in summary:
+        lines.append(f"  - {s}")
     return "\n".join(lines)
