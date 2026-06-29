@@ -173,7 +173,7 @@ if ($Install) {
     $user   = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -PollIntervalSeconds $PollIntervalSeconds -HealthCheckIntervalSeconds $HealthCheckIntervalSeconds"
     $trigger  = New-ScheduledTaskTrigger -AtStartup
-    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Days 36500)
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -DontStopOnIdleEnd -ExecutionTimeLimit ([TimeSpan]::Zero)
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -User $user -RunLevel Limited | Out-Null
     Write-Host "Installed. Starting task..." -ForegroundColor Green
     Start-ScheduledTask -TaskName $TaskName
